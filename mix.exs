@@ -57,7 +57,6 @@ defmodule HelloNerves.MixProject do
 
       # control gpio
       {:circuits_gpio, "~> 2.1"},
-
       {:pigpiox, "~> 0.1.2"},
 
       # Dependencies for specific targets

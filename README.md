@@ -33,6 +33,36 @@ To start your Nerves app:
   * Create firmware with `mix firmware`
   * Burn to an SD card with `mix burn`
 
+### Build and Deploy Workflow for Raspberry Pi Zero 2W
+
+For the Raspberry Pi Zero 2W, use the `rpi3a` target:
+
+1. Install dependencies (only needed once):
+   ```bash
+   MIX_TARGET=rpi3a mix deps.get
+   ```
+
+2. Compile the project:
+   ```bash
+   MIX_TARGET=rpi3a mix compile
+   ```
+
+3. Build the firmware:
+   ```bash
+   MIX_TARGET=rpi3a mix firmware
+   ```
+
+4. Deploy to SD card or device:
+   ```bash
+   # For initial burn to SD card:
+   MIX_TARGET=rpi3a mix burn
+   
+   # For updates over network:
+   MIX_TARGET=rpi3a mix upload
+   ```
+
+Note: Always include `MIX_TARGET=rpi3a` before each command to ensure you're building for the correct target.
+
 ## Learn more
 
   * Official docs: https://hexdocs.pm/nerves/getting-started.html
