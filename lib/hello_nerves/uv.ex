@@ -13,11 +13,31 @@ defmodule HelloNerves.UV do
     Trig.pulse_us(@uv_trig, @trigger_duration_us)
   end
 
-  def run() do
+  def run(interval_ms \\ 1000) do
     {trig, echo} = open()
     pid = spawn_receiver(echo)
+
+    # Start a timer process that pulses at regular intervals
+    timer_pid =
+      spawn(fn ->
+        pulse_loop(interval_ms)
+      end)
+
+    {trig, echo, pid, timer_pid}
+  end
+
+  defp pulse_loop(interval_ms) do
     pulse()
-    {trig, echo, pid}
+    Process.sleep(interval_ms)
+    pulse_loop(interval_ms)
+  end
+
+  def stop({trig, echo, receiver_pid, timer_pid}) do
+    Process.exit(timer_pid, :shutdown)
+    Process.exit(receiver_pid, :shutdown)
+    Circuits.GPIO.close(trig)
+    Circuits.GPIO.close(echo)
+    :ok
   end
 
   # pass in reference()
@@ -29,29 +49,27 @@ defmodule HelloNerves.UV do
   end
 
   defp listen_loop(rising_timestamp) do
-    IO.puts("in receiver loop")
-
     receive do
-      {:circuits_gpio, pin, timestamp, value} ->
-        IO.puts("pin: #{inspect(pin)}, timestamp=#{inspect(timestamp)}, value=#{value}")
+      {:circuits_gpio, _pin, timestamp, value} ->
+        # IO.puts("pin: #{inspect(pin)}, timestamp=#{inspect(timestamp)}, value=#{value}")
 
         case {value, rising_timestamp} do
           {1, _} ->
             # Rising edge - echo started
-            IO.puts("Echo started - Rising timestamp: #{timestamp}")
+            # IO.puts("Echo started - Rising timestamp: #{timestamp}")
             listen_loop(timestamp)
 
           {0, nil} ->
             # Falling edge but no rising edge recorded - ignore
-            IO.puts("Falling edge without rising edge - ignoring")
+            # IO.puts("Falling edge without rising edge - ignoring")
             listen_loop(nil)
 
           {0, rising_ts} ->
             # Falling edge - echo ended, calculate distance
-            IO.puts("Echo ended - Falling timestamp: #{timestamp}")
-            IO.puts("Rising timestamp was: #{rising_ts}")
+            # IO.puts("Echo ended - Falling timestamp: #{timestamp}")
+            # IO.puts("Rising timestamp was: #{rising_ts}")
             duration_ns = timestamp - rising_ts
-            IO.puts("Duration: #{duration_ns} ns")
+            # IO.puts("Duration: #{duration_ns} ns")
             distance_cm = calculate_distance(duration_ns)
             IO.puts("Distance: #{distance_cm} cm")
             listen_loop(nil)
@@ -60,8 +78,8 @@ defmodule HelloNerves.UV do
             listen_loop(rising_timestamp)
         end
 
-      msg ->
-        IO.puts("got unknown message: #{inspect(msg)}")
+      _msg ->
+        # IO.puts("got unknown message: #{inspect(msg)}")
         listen_loop(rising_timestamp)
     end
   end
