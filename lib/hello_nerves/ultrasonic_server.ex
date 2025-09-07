@@ -6,7 +6,7 @@ defmodule HelloNerves.UltrasonicServer do
   @measurement_interval 50  # ms between measurements
   
   defmodule State do
-    defstruct [:trig, :echo, :receiver_pid, :latest_distance, :history, max_history: 10]
+    defstruct [:trig, :echo, :receiver_pid, :latest_distance, :history, :rising_timestamp, max_history: 10]
   end
   
   # Client API
@@ -38,13 +38,8 @@ defmodule HelloNerves.UltrasonicServer do
     # Open GPIO pins using UV.open()
     {trig, echo} = HelloNerves.UV.open()
     
-    # Spawn receiver using UV.spawn_receiver()
-  # TK: lets try and move this listen_loop() logic into ultrasonic sensor, i think
-  # we can just make this a handle_info() instead of a loop right?
-  # so we set interrupts ourselves here then we add our handle_info that
-  # does the same thing that listen_loop does
-  # still use calculate_disntace and all that from the uv module
-    receiver_pid = HelloNerves.UV.spawn_receiver(echo)
+    # Set interrupts on echo pin directly (no separate receiver process)
+    :ok = Circuits.GPIO.set_interrupts(echo, :both)
     
     # Schedule the sensor loop to start
     Process.send_after(self(), :loop_sensor, 100)
@@ -52,9 +47,10 @@ defmodule HelloNerves.UltrasonicServer do
     state = %State{
       trig: trig,
       echo: echo,
-      receiver_pid: receiver_pid,
+      receiver_pid: nil,  # No separate receiver process anymore
       latest_distance: nil,
-      history: []
+      history: [],
+      rising_timestamp: nil  # Track rising edge timestamp for distance calculation
     }
     
     {:ok, state}
@@ -99,8 +95,42 @@ defmodule HelloNerves.UltrasonicServer do
   end
   
   @impl true
+  def handle_info({:circuits_gpio, _pin, timestamp, value}, state) do
+    # Handle GPIO interrupts from the echo pin
+    new_state = case {value, state.rising_timestamp} do
+      {1, _} ->
+        # Rising edge - echo started
+        %{state | rising_timestamp: timestamp}
+        
+      {0, nil} ->
+        # Falling edge but no rising edge recorded - ignore
+        state
+        
+      {0, rising_ts} ->
+        # Falling edge - echo ended, calculate distance
+        duration_ns = timestamp - rising_ts
+        distance_cm = HelloNerves.UV.calculate_distance(duration_ns)
+        IO.puts("Distance: #{distance_cm} cm")
+        
+        # Update state with new distance
+        new_history = [distance_cm | state.history] |> Enum.take(state.max_history)
+        
+        %{state | 
+          rising_timestamp: nil,
+          latest_distance: distance_cm,
+          history: new_history
+        }
+        
+      _ ->
+        state
+    end
+    
+    {:noreply, new_state}
+  end
+  
+  @impl true
   def handle_info({:distance, distance}, state) do
-    # Update state with new distance
+    # Keep this for compatibility if needed
     new_history = [distance | state.history] |> Enum.take(state.max_history)
     
     new_state = %{state | 

@@ -88,7 +88,7 @@ defmodule HelloNerves.UV do
   # Speed of sound is ~343 m/s at 20°C
   # Distance = (Duration × Speed of Sound) / 2
   # We divide by 2 because the sound travels to the object and back
-  defp calculate_distance(duration_ns) do
+  def calculate_distance(duration_ns) do
     # Convert nanoseconds to seconds
     duration_s = duration_ns / 1_000_000_000
 
