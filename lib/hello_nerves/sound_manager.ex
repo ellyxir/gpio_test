@@ -7,8 +7,9 @@ defmodule HelloNerves.SoundManager do
   alias HelloNerves.AudioStream
   alias HelloNerves.UltrasonicServer
   
-  @buffer_duration_ms 100  # Duration of each buffer (longer for smoother transitions)
-  @crossfade_ms 5  # Duration of crossfade between buffers
+  @buffer_duration_ms 50  # Shorter buffer for less delay
+  @crossfade_ms 3  # Shorter crossfade
+  @schedule_ahead_ms 10  # Schedule next buffer 10ms before current ends
   
   # Distance range in cm
   @min_distance 5
@@ -19,7 +20,8 @@ defmodule HelloNerves.SoundManager do
   @max_freq 2000
   
   defmodule State do
-    defstruct [:audio_port, :frequency, :phase, :sample_rate, :current_buffer]
+    defstruct [:audio_port, :frequency, :phase, :sample_rate, :current_buffer, 
+               :start_time, :audio_generated_ms]
   end
   
   # Client API
@@ -45,16 +47,20 @@ defmodule HelloNerves.SoundManager do
     initial_buffer = generate_buffer(440, 0, @buffer_duration_ms, sample_rate)
     AudioStream.send_audio(audio_port, initial_buffer.pcm_data)
     
-    # Schedule next buffer generation before current one finishes
-    # Generate 20ms before the buffer ends to ensure continuous playback
-    Process.send_after(self(), :generate_buffer, @buffer_duration_ms - 20)
+    # Record start time
+    start_time = System.monotonic_time(:millisecond)
+    
+    # Schedule next buffer generation
+    Process.send_after(self(), :generate_buffer, @buffer_duration_ms - @schedule_ahead_ms)
     
     state = %State{
       audio_port: audio_port,
       frequency: 440,
       phase: initial_buffer.end_phase,
       sample_rate: sample_rate,
-      current_buffer: :a
+      current_buffer: :a,
+      start_time: start_time,
+      audio_generated_ms: @buffer_duration_ms  # We generated one buffer
     }
     
     {:ok, state}
@@ -62,41 +68,53 @@ defmodule HelloNerves.SoundManager do
   
   @impl true
   def handle_info(:generate_buffer, state) do
-    # Get distance from UltrasonicServer
-    distance = UltrasonicServer.get_distance()
+    # Check if we're ahead of real time
+    elapsed_ms = System.monotonic_time(:millisecond) - state.start_time
+    ahead_by = state.audio_generated_ms - elapsed_ms
     
-    # Calculate frequency based on distance
-    new_frequency = if distance do
-      freq = distance_to_frequency(distance)
-      # IO.puts("Distance: #{Float.round(distance, 1)}cm -> Frequency: #{round(freq)}Hz")
-      round(freq)
+    # If we're more than 10ms ahead, wait
+    if ahead_by > 10 do
+      # We're ahead - reschedule for when we should generate
+      Process.send_after(self(), :generate_buffer, ahead_by)
+      {:noreply, state}
     else
-      state.frequency  # Keep previous frequency if no reading
+      # Get distance from UltrasonicServer
+      distance = UltrasonicServer.get_distance()
+      
+      # Calculate frequency based on distance
+      new_frequency = if distance do
+        freq = distance_to_frequency(distance)
+        # Uncomment for debug: IO.puts("Distance: #{Float.round(distance, 1)}cm -> Freq: #{round(freq)}Hz, Ahead: #{ahead_by}ms")
+        round(freq)
+      else
+        state.frequency  # Keep previous frequency if no reading
+      end
+      
+      # Generate next buffer with phase continuity and crossfade
+      buffer = if abs(new_frequency - state.frequency) > 50 do
+        # Large frequency change - do crossfade
+        generate_buffer_with_crossfade(state.frequency, new_frequency, state.phase, 
+                                       @buffer_duration_ms, @crossfade_ms, state.sample_rate)
+      else
+        # Small change - just continue with phase tracking
+        generate_buffer(new_frequency, state.phase, @buffer_duration_ms, state.sample_rate)
+      end
+      
+      # Send the buffer
+      AudioStream.send_audio(state.audio_port, buffer.pcm_data)
+      
+      # Schedule next buffer generation
+      Process.send_after(self(), :generate_buffer, @buffer_duration_ms - @schedule_ahead_ms)
+      
+      # Update state
+      next_buffer = if state.current_buffer == :a, do: :b, else: :a
+      {:noreply, %{state | 
+        frequency: new_frequency,
+        phase: buffer.end_phase,
+        current_buffer: next_buffer,
+        audio_generated_ms: state.audio_generated_ms + @buffer_duration_ms
+      }}
     end
-    
-    # Generate next buffer with phase continuity and crossfade
-    buffer = if abs(new_frequency - state.frequency) > 50 do
-      # Large frequency change - do crossfade
-      generate_buffer_with_crossfade(state.frequency, new_frequency, state.phase, 
-                                     @buffer_duration_ms, @crossfade_ms, state.sample_rate)
-    else
-      # Small change - just continue with phase tracking
-      generate_buffer(new_frequency, state.phase, @buffer_duration_ms, state.sample_rate)
-    end
-    
-    # Send the buffer
-    AudioStream.send_audio(state.audio_port, buffer.pcm_data)
-    
-    # Schedule next buffer generation
-    Process.send_after(self(), :generate_buffer, @buffer_duration_ms - 20)
-    
-    # Update state
-    next_buffer = if state.current_buffer == :a, do: :b, else: :a
-    {:noreply, %{state | 
-      frequency: new_frequency,
-      phase: buffer.end_phase,
-      current_buffer: next_buffer
-    }}
   end
   
   @impl true

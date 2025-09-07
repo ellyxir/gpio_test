@@ -8,7 +8,12 @@ defmodule HelloNerves.AudioStream do
   Returns a port that can be sent audio data
   """
   def start_aplay(sample_rate \\ 22050) do
-    Port.open({:spawn, "aplay -f S16_LE -r #{sample_rate} -c 1 -q"}, [:binary])
+    # Set small buffer for low latency:
+    # --buffer-time=50000 = 50ms total buffer
+    # --period-time=10000 = 10ms period size
+    # This should give us ~50ms latency instead of seconds
+    cmd = "aplay -f S16_LE -r #{sample_rate} -c 1 -q --buffer-time=50000 --period-time=10000"
+    Port.open({:spawn, cmd}, [:binary])
   end
   
   @doc """
