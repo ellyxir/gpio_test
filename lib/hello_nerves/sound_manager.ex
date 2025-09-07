@@ -7,7 +7,8 @@ defmodule HelloNerves.SoundManager do
   alias HelloNerves.AudioStream
   alias HelloNerves.UltrasonicServer
   
-  @tone_duration_ms 50  # Duration of each tone
+  @buffer_duration_ms 100  # Duration of each buffer (longer for smoother transitions)
+  @crossfade_ms 5  # Duration of crossfade between buffers
   
   # Distance range in cm
   @min_distance 5
@@ -18,7 +19,7 @@ defmodule HelloNerves.SoundManager do
   @max_freq 2000
   
   defmodule State do
-    defstruct [:audio_port, :frequency, :tone_duration, :audio_queue, :queue_size]
+    defstruct [:audio_port, :frequency, :phase, :sample_rate, :current_buffer]
   end
   
   # Client API
@@ -35,29 +36,32 @@ defmodule HelloNerves.SoundManager do
   
   @impl true
   def init(_) do
+    sample_rate = 22050
+    
     # Start the audio port
-    audio_port = AudioStream.start_aplay()
+    audio_port = AudioStream.start_aplay(sample_rate)
     
-    # Send just one initial tone to prime the buffer
-    initial_tone = AudioStream.generate_tone(440, @tone_duration_ms)
-    AudioStream.send_audio(audio_port, initial_tone)
+    # Generate initial buffer
+    initial_buffer = generate_buffer(440, 0, @buffer_duration_ms, sample_rate)
+    AudioStream.send_audio(audio_port, initial_buffer.pcm_data)
     
-    # Schedule tone generation to match playback rate
-    Process.send_after(self(), :generate_tone, @tone_duration_ms)
+    # Schedule next buffer generation before current one finishes
+    # Generate 20ms before the buffer ends to ensure continuous playback
+    Process.send_after(self(), :generate_buffer, @buffer_duration_ms - 20)
     
     state = %State{
       audio_port: audio_port,
-      frequency: 440,  # Default frequency
-      tone_duration: @tone_duration_ms,
-      audio_queue: [],
-      queue_size: 1  # We sent one tone
+      frequency: 440,
+      phase: initial_buffer.end_phase,
+      sample_rate: sample_rate,
+      current_buffer: :a
     }
     
     {:ok, state}
   end
   
   @impl true
-  def handle_info(:generate_tone, state) do
+  def handle_info(:generate_buffer, state) do
     # Get distance from UltrasonicServer
     distance = UltrasonicServer.get_distance()
     
@@ -70,18 +74,29 @@ defmodule HelloNerves.SoundManager do
       state.frequency  # Keep previous frequency if no reading
     end
     
-    # Generate new tone
-    pcm_data = AudioStream.generate_tone(new_frequency, state.tone_duration)
+    # Generate next buffer with phase continuity and crossfade
+    buffer = if abs(new_frequency - state.frequency) > 50 do
+      # Large frequency change - do crossfade
+      generate_buffer_with_crossfade(state.frequency, new_frequency, state.phase, 
+                                     @buffer_duration_ms, @crossfade_ms, state.sample_rate)
+    else
+      # Small change - just continue with phase tracking
+      generate_buffer(new_frequency, state.phase, @buffer_duration_ms, state.sample_rate)
+    end
     
-    # Send immediately
-    AudioStream.send_audio(state.audio_port, pcm_data)
+    # Send the buffer
+    AudioStream.send_audio(state.audio_port, buffer.pcm_data)
     
-    # Schedule next tone at exactly the playback rate
-    # This keeps us synchronized without building up a queue
-    Process.send_after(self(), :generate_tone, state.tone_duration)
+    # Schedule next buffer generation
+    Process.send_after(self(), :generate_buffer, @buffer_duration_ms - 20)
     
     # Update state
-    {:noreply, %{state | frequency: new_frequency}}
+    next_buffer = if state.current_buffer == :a, do: :b, else: :a
+    {:noreply, %{state | 
+      frequency: new_frequency,
+      phase: buffer.end_phase,
+      current_buffer: next_buffer
+    }}
   end
   
   @impl true
@@ -106,6 +121,60 @@ defmodule HelloNerves.SoundManager do
     
     # Scale normalized value to log range and convert back
     @min_freq * :math.exp(normalized * log_range)
+  end
+  
+  defp generate_buffer(frequency, start_phase, duration_ms, sample_rate) do
+    samples = round(sample_rate * duration_ms / 1000)
+    omega = 2.0 * :math.pi() * frequency / sample_rate
+    
+    {pcm_data, end_phase} = generate_samples(samples, omega, start_phase)
+    
+    %{pcm_data: pcm_data, end_phase: end_phase}
+  end
+  
+  defp generate_buffer_with_crossfade(old_freq, new_freq, start_phase, duration_ms, crossfade_ms, sample_rate) do
+    total_samples = round(sample_rate * duration_ms / 1000)
+    crossfade_samples = round(sample_rate * crossfade_ms / 1000)
+    
+    # Generate the crossfade portion
+    omega_old = 2.0 * :math.pi() * old_freq / sample_rate
+    omega_new = 2.0 * :math.pi() * new_freq / sample_rate
+    
+    # Crossfade: fade out old frequency while fading in new frequency
+    crossfade_data = for i <- 0..(crossfade_samples - 1) do
+      fade_out = (crossfade_samples - i) / crossfade_samples
+      fade_in = i / crossfade_samples
+      
+      old_sample = :math.sin(start_phase + omega_old * i) * fade_out
+      new_sample = :math.sin(omega_new * i) * fade_in
+      
+      value = (old_sample + new_sample) * 32767
+      sample = round(value) |> max(-32768) |> min(32767)
+      <<sample::little-signed-16>>
+    end
+    
+    # Generate the rest with new frequency
+    new_phase = omega_new * crossfade_samples
+    remaining_samples = total_samples - crossfade_samples
+    {remaining_data, end_phase} = generate_samples(remaining_samples, omega_new, new_phase)
+    
+    pcm_data = IO.iodata_to_binary([crossfade_data | remaining_data])
+    %{pcm_data: pcm_data, end_phase: end_phase}
+  end
+  
+  defp generate_samples(num_samples, omega, start_phase) do
+    pcm_list = for i <- 0..(num_samples - 1) do
+      phase = start_phase + omega * i
+      value = :math.sin(phase)
+      sample = round(value * 32767) |> max(-32768) |> min(32767)
+      <<sample::little-signed-16>>
+    end
+    
+    end_phase = start_phase + omega * num_samples
+    # Normalize phase to 0..2π to prevent overflow
+    normalized_phase = :math.fmod(end_phase, 2.0 * :math.pi())
+    
+    {pcm_list, normalized_phase}
   end
   
   # Original test functions for backwards compatibility
