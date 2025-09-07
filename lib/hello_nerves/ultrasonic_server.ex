@@ -15,6 +15,10 @@ defmodule HelloNerves.UltrasonicServer do
     GenServer.start_link(__MODULE__, nil, Keyword.put_new(opts, :name, __MODULE__))
   end
   
+  def stop() do
+    GenServer.stop(__MODULE__)
+  end
+  
   def get_distance() do
     GenServer.call(__MODULE__, :get_distance)
   end
@@ -110,7 +114,7 @@ defmodule HelloNerves.UltrasonicServer do
         # Falling edge - echo ended, calculate distance
         duration_ns = timestamp - rising_ts
         distance_cm = HelloNerves.UV.calculate_distance(duration_ns)
-        IO.puts("Distance: #{distance_cm} cm")
+        # IO.puts("Distance: #{distance_cm} cm")
         
         # Update state with new distance
         new_history = [distance_cm | state.history] |> Enum.take(state.max_history)

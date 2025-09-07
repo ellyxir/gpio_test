@@ -18,7 +18,7 @@ defmodule HelloNerves.SoundManager do
   @max_freq 2000
   
   defmodule State do
-    defstruct [:audio_port, :frequency, :tone_duration]
+    defstruct [:audio_port, :frequency, :tone_duration, :audio_queue, :queue_size]
   end
   
   # Client API
@@ -38,40 +38,49 @@ defmodule HelloNerves.SoundManager do
     # Start the audio port
     audio_port = AudioStream.start_aplay()
     
-    # Schedule first tone
-    Process.send_after(self(), :play_tone, 100)
+    # Send just one initial tone to prime the buffer
+    initial_tone = AudioStream.generate_tone(440, @tone_duration_ms)
+    AudioStream.send_audio(audio_port, initial_tone)
+    
+    # Schedule tone generation to match playback rate
+    Process.send_after(self(), :generate_tone, @tone_duration_ms)
     
     state = %State{
       audio_port: audio_port,
       frequency: 440,  # Default frequency
-      tone_duration: @tone_duration_ms
+      tone_duration: @tone_duration_ms,
+      audio_queue: [],
+      queue_size: 1  # We sent one tone
     }
     
     {:ok, state}
   end
   
   @impl true
-  def handle_info(:play_tone, state) do
+  def handle_info(:generate_tone, state) do
     # Get distance from UltrasonicServer
     distance = UltrasonicServer.get_distance()
     
     # Calculate frequency based on distance
     new_frequency = if distance do
       freq = distance_to_frequency(distance)
-      IO.puts("Distance: #{Float.round(distance, 1)}cm -> Frequency: #{round(freq)}Hz")
+      # IO.puts("Distance: #{Float.round(distance, 1)}cm -> Frequency: #{round(freq)}Hz")
       round(freq)
     else
       state.frequency  # Keep previous frequency if no reading
     end
     
-    # Generate and send tone
+    # Generate new tone
     pcm_data = AudioStream.generate_tone(new_frequency, state.tone_duration)
+    
+    # Send immediately
     AudioStream.send_audio(state.audio_port, pcm_data)
     
-    # Schedule next tone
-    Process.send_after(self(), :play_tone, state.tone_duration)
+    # Schedule next tone at exactly the playback rate
+    # This keeps us synchronized without building up a queue
+    Process.send_after(self(), :generate_tone, state.tone_duration)
     
-    # Update state with new frequency
+    # Update state
     {:noreply, %{state | frequency: new_frequency}}
   end
   
