@@ -78,8 +78,8 @@ defmodule HelloNerves.SoundManager do
       Process.send_after(self(), :generate_buffer, ahead_by)
       {:noreply, state}
     else
-      # Get distance from UltrasonicServer
-      distance = UltrasonicServer.get_distance()
+      # Get smoothed distance from UltrasonicServer (average of last 5 readings)
+      distance = UltrasonicServer.get_smoothed_distance(5)
       
       # Calculate frequency based on distance
       new_frequency = if distance do
