@@ -26,7 +26,7 @@ defmodule HelloNerves.UV do
     {trig, echo, pid, timer_pid}
   end
 
-  defp pulse_loop(interval_ms) do
+  def pulse_loop(interval_ms) do
     pulse()
     Process.sleep(interval_ms)
     pulse_loop(interval_ms)
